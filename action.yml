@@ -1,5 +1,5 @@
 name: Lians check
-description: For robotics and embodied-AI teams. Checks each agent-written PR against its ticket as it reads now, before the code reaches hardware.
+description: Checks each agent-written PR against its ticket as it reads now. Built for robotics teams, before code reaches hardware.
 branding:
   icon: check-square
   color: blue
