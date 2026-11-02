@@ -28,7 +28,7 @@ from datetime import datetime
 MARKER = "<!-- lians-check -->"
 SETUP_NOTE = (MARKER + "\n### Lians check\n\nLians found a linked ticket but has no Claude API key, so it did not "
               "review this PR. Add an `ANTHROPIC_API_KEY` repository secret and pass it to the action as "
-              "`anthropic-api-key`.")
+              "`anthropic-api-key`, or set `bedrock-model` to run Claude through your own Amazon Bedrock.")
 MODEL = os.environ.get("LIANS_CHECK_MODEL", "claude-opus-5-5")
 MAX_DIFF_CHARS = 300_000
 LINEAR_KEY = re.compile(r"\b([A-Z][A-Z0-9]{1,9}-\d{1,6})\b")
@@ -288,6 +288,28 @@ def judge_api(prompt: str) -> dict:
     return json.loads(text)
 
 
+def judge_bedrock(prompt: str) -> dict:
+    """Claude through the customer's own Amazon Bedrock (including GovCloud), so the diff stays in their AWS account.
+
+    Credentials and region come from the usual AWS environment (AWS_REGION, OIDC role, profile). Bedrock has no
+    server-side fallback, so this is a plain structured-output call."""
+    import anthropic
+    client = anthropic.AnthropicBedrock()
+    response = client.messages.create(
+        model=os.environ["LIANS_BEDROCK_MODEL"],
+        max_tokens=16000,
+        system=SYSTEM,
+        messages=[{"role": "user", "content": prompt}],
+        output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
+    )
+    if response.stop_reason == "refusal":
+        raise RuntimeError("the model declined to review this PR")
+    if response.stop_reason == "max_tokens":
+        raise RuntimeError("the review was cut off (output too long)")
+    text = next(b.text for b in response.content if b.type == "text")
+    return json.loads(text)
+
+
 def judge_cli(prompt: str) -> dict:
     """Local runs on a Claude Code subscription: the same prompt and schema through `claude -p`.
 
@@ -306,8 +328,9 @@ def judge_cli(prompt: str) -> dict:
 
 def judge(prompt: str, backend: str) -> dict:
     if backend == "auto":
-        backend = "api" if os.environ.get("ANTHROPIC_API_KEY") else "cli"
-    return judge_api(prompt) if backend == "api" else judge_cli(prompt)
+        backend = ("bedrock" if os.environ.get("LIANS_BEDROCK_MODEL")
+                   else "api" if os.environ.get("ANTHROPIC_API_KEY") else "cli")
+    return {"api": judge_api, "bedrock": judge_bedrock}.get(backend, judge_cli)(prompt)
 
 
 # -- output -------------------------------------------------------------------------------------------------
@@ -403,7 +426,7 @@ def main() -> int:
     ap.add_argument("--ticket-file", help="check a local diff against a local ticket instead of a PR")
     ap.add_argument("--ticket-start-file", help="the ticket's text when work started (optional)")
     ap.add_argument("--diff-file")
-    ap.add_argument("--backend", choices=["auto", "api", "cli"], default="auto")
+    ap.add_argument("--backend", choices=["auto", "api", "bedrock", "cli"], default="auto")
     ap.add_argument("--dry-run", action="store_true", help="print the comment instead of posting it")
     ap.add_argument("--fail-on-missed", action="store_true", help="exit 1 when a requirement is missed")
     ap.add_argument("--json", action="store_true", help="also print the raw result")
@@ -424,7 +447,8 @@ def main() -> int:
             return 0
         failed = False
         for pr in prs:
-            no_key = not os.environ.get("ANTHROPIC_API_KEY") and args.backend in ("auto", "api")
+            no_key = (not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("LIANS_BEDROCK_MODEL")
+                      and args.backend in ("auto", "api"))
             if no_key and os.environ.get("GITHUB_ACTIONS") and not args.dry_run:
                 if _has_ticket(token, args.repo, pr):
                     print(upsert_comment(token, args.repo, pr, SETUP_NOTE))

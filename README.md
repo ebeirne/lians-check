@@ -51,6 +51,25 @@ jobs:
 Optional inputs: `linear-api-key` (read-only, to check Linear tickets named in the PR title, branch or body),
 `fail-on-missed: "true"` to fail the check when a requirement is missed.
 
+## Keep code inside your AWS (Amazon Bedrock, including GovCloud)
+
+For export-controlled or regulated code, run Claude through your own Amazon Bedrock instead of the Anthropic API.
+The diff then goes only to Bedrock in your AWS account and region, including AWS GovCloud (US). No Anthropic key
+is needed. Give the workflow `id-token: write` and replace the step with:
+
+```yaml
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws-us-gov:iam::123456789012:role/lians-bedrock   # a role allowed to call bedrock:InvokeModel
+          aws-region: us-gov-west-1
+      - uses: ebeirne/lians-check@v1
+        with:
+          bedrock-model: <the Claude model ID or inference profile enabled in your Bedrock account>
+```
+
+Bedrock calls are billed by AWS to your account. Lians itself never sees your code.
+
 ## What it will and won't say
 
 Lians only grades issues the PR says it closes. It treats the ticket author's and maintainers' latest comments as
