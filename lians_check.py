@@ -347,8 +347,10 @@ def render(result: dict, tickets: list[Ticket], truncated: bool = False) -> str:
         lines.append("")
     if truncated:
         lines.append(f"_The diff was longer than {MAX_DIFF_CHARS:,} characters; only the first part was reviewed._")
-    lines.append("<sub>Lians reads the ticket now, not when the work started. "
-                 "✅ met · 🟡 partial · ❌ missed · ❔ can't tell from the diff</sub>")
+    lines.append("<sub>✅ met · 🟡 partial · ❌ missed · ❔ can't tell from the diff<br>"
+                 "Checked by [Lians](https://www.lians.ai/?ref=pr-comment), which reads the ticket as it is now, "
+                 "not when the work started. Free for open source: "
+                 "[add it to your repo](https://github.com/marketplace/actions/lians-check).</sub>")
     return "\n".join(lines)
 
 
