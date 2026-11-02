@@ -51,6 +51,47 @@ jobs:
 Optional inputs: `linear-api-key` (read-only, to check Linear tickets named in the PR title, branch or body),
 `fail-on-missed: "true"` to fail the check when a requirement is missed.
 
+## Jira
+
+Add three inputs and Lians checks Jira issues named in the PR title, branch or body (for example `ROB-142`). Jira keeps every earlier version of the description, so Lians knows exactly what the ticket said when work started.
+
+```yaml
+      - uses: ebeirne/lians-check@v1
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          jira-base-url: https://acme.atlassian.net
+          jira-email: ${{ secrets.JIRA_EMAIL }}
+          jira-api-token: ${{ secrets.JIRA_API_TOKEN }}
+```
+
+## When the ticket changes
+
+Keep `issues: types: [edited]` in the workflow. When someone edits a ticket, Lians re-checks every open PR that closes it. If the PR no longer covers the new version, it posts a short new comment tagging the PR's author with the requirements that now need a look, so the change can't slip past whoever (or whatever agent) is working on it.
+
+## Robot code: parameters, launch files and URDFs
+
+In ROS-style repos (anything with a `package.xml`), Lians also reads the parameter YAMLs, launch files and robot descriptions at the PR's head commit, not just the diff. A ticket that says "cap joint velocity at 1.2 rad/s" is checked against the value actually in `config/*.yaml`, even when the PR didn't touch that file. Set `robot-context: off` to check the diff only.
+
+## Traceability record
+
+Every check stores its result in the PR comment. Run Lians in `export` mode to get one CSV row per requirement per PR (ticket, requirement, status, evidence, PR, commit, date) plus a readable Markdown report, uploaded as the `lians-trace` artifact. It's the record a safety review or audit asks for: which requirement was built where, with what evidence.
+
+```yaml
+name: Lians traceability export
+on: workflow_dispatch
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ebeirne/lians-check@v1
+        with:
+          mode: export
+```
+
 ## Keep code inside your AWS (Amazon Bedrock, including GovCloud)
 
 For export-controlled or regulated code, run Claude through your own Amazon Bedrock instead of the Anthropic API.

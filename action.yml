@@ -10,6 +10,21 @@ inputs:
   linear-api-key:
     description: Linear API key (read-only), to check Linear tickets named in the PR title, branch or body.
     required: false
+  jira-base-url:
+    description: Your Jira site, e.g. https://acme.atlassian.net. With jira-email and jira-api-token, Lians checks Jira issues (PROJ-123) named in the PR title, branch or body.
+    required: false
+  jira-email:
+    description: Email of the Jira account that owns jira-api-token.
+    required: false
+  jira-api-token:
+    description: Jira API token (read access to the issues is enough).
+    required: false
+  robot-context:
+    description: "auto: in ROS-style repos (a package.xml), also read parameter, launch and URDF files that the diff doesn't show, so limits and settings can be checked. off: diff only."
+    default: auto
+  mode:
+    description: "check: comment on the PR (default). export: write a traceability record of every Lians check in the repo (CSV + Markdown) and upload it as the lians-trace artifact."
+    default: check
   github-token:
     description: Token used to read the PR and tickets and to post the comment.
     default: ${{ github.token }}
@@ -40,9 +55,24 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         LIANS_CHECK_MODEL: ${{ inputs.model }}
         LIANS_BEDROCK_MODEL: ${{ inputs.bedrock-model }}
+        JIRA_BASE_URL: ${{ inputs.jira-base-url }}
+        JIRA_EMAIL: ${{ inputs.jira-email }}
+        JIRA_API_TOKEN: ${{ inputs.jira-api-token }}
+        LIANS_ROBOT_CONTEXT: ${{ inputs.robot-context }}
+        LIANS_MODE: ${{ inputs.mode }}
         AWS_REGION: ${{ inputs.aws-region || env.AWS_REGION }}
         FAIL_ON_MISSED: ${{ inputs.fail-on-missed }}
       run: |
         args=()
         [ "$FAIL_ON_MISSED" = "true" ] && args+=(--fail-on-missed)
-        python "$GITHUB_ACTION_PATH/lians_check.py" "${args[@]}"
+        if [ "$LIANS_MODE" = "export" ]; then
+          mkdir -p lians-trace
+          python "$GITHUB_ACTION_PATH/lians_check.py" --export --out lians-trace/lians-trace.csv
+        else
+          python "$GITHUB_ACTION_PATH/lians_check.py" "${args[@]}"
+        fi
+    - if: inputs.mode == 'export'
+      uses: actions/upload-artifact@v4
+      with:
+        name: lians-trace
+        path: lians-trace/

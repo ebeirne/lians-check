@@ -1,6 +1,6 @@
 """Lians PR check: is this pull request built to the ticket as it reads now?
 
-For a PR it finds the linked tickets (GitHub issues it closes, Linear keys in the title, branch or
+For a PR it finds the linked tickets (GitHub issues it closes, Linear or Jira keys in the title, branch or
 body), reads each ticket's current text and, where history exists, the text when work started. Claude then
 lists the ticket's requirements and marks each one met, missed, partial or unclear against the PR's diff, and
 flags requirements that changed after work started. The result is one PR comment, updated in place.
@@ -8,11 +8,15 @@ flags requirements that changed after work started. The result is one PR comment
 Runs as a GitHub Action (see action.yml) or locally:
   python check/lians_check.py --repo owner/name --pr 123 --dry-run      # print the comment, post nothing
   python check/lians_check.py --ticket-file t.md --diff-file d.diff      # no GitHub at all
+  python check/lians_check.py --repo owner/name --export --out trace.csv  # traceability record of every check
 """
 from __future__ import annotations
 
 import argparse
+import base64
+import csv
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -23,9 +27,11 @@ import tempfile
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 MARKER = "<!-- lians-check -->"
+ALERT_MARKER = "<!-- lians-alert -->"
+DATA_RE = re.compile(r"<!-- lians-data:([A-Za-z0-9+/=]+) -->")
 SETUP_NOTE = (MARKER + "\n### Lians check\n\nLians found a linked ticket but has no Claude API key, so it did not "
               "review this PR. Add an `ANTHROPIC_API_KEY` repository secret and pass it to the action as "
               "`anthropic-api-key`, or set `bedrock-model` to run Claude through your own Amazon Bedrock.")
@@ -88,6 +94,10 @@ Judge behaviour, not form. A signature in the ticket names what to build: missin
 naming style or a different file layout are not misses unless the ticket says they are required. Do not list
 "implement the function" as its own requirement; judge the behaviours it must have.
 
+When <robot_config> is given, it holds the robot's parameter files, launch files and descriptions at the PR's
+head commit, outside the diff. Use it as evidence: a limit or setting the ticket asks for that is already set
+correctly there is met, and one set to a different value is missed. Name the file in the evidence.
+
 When the ticket's text at the start of work is given, mark changed_after_start=true for every requirement that
 was added or changed after work started. Those are the requirements most likely to be missed.
 
@@ -107,6 +117,11 @@ class Ticket:
     @property
     def changed(self) -> bool:
         return bool(self.changed_at) or (self.body_at_start is not None and self.body_at_start != self.body)
+
+    @property
+    def sha(self) -> str:
+        """Fingerprint of the ticket's current text, so the next check can tell whether it was edited since."""
+        return hashlib.sha1(self.body.encode("utf-8")).hexdigest()[:12]
 
 
 # -- GitHub -------------------------------------------------------------------------------------------------
@@ -140,7 +155,8 @@ PR_QUERY = """
 query($owner: String!, $name: String!, $pr: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $pr) {
-      title body createdAt headRefName url
+      title body createdAt headRefName headRefOid url
+      author { login }
       commits(first: 1) { nodes { commit { authoredDate } } }
       closingIssuesReferences(first: 10) { nodes { number } }
     }
@@ -244,13 +260,91 @@ def linear_ticket(key: str, ident: str, started: datetime) -> Ticket | None:
     return t
 
 
+# -- Jira ---------------------------------------------------------------------------------------------------
+
+def jira_ticket(base_url: str, email: str, api_token: str, key: str, started: datetime) -> Ticket | None:
+    """A Jira Cloud or Data Center issue. API v2 returns the description as plain text, and the changelog keeps
+    every earlier version of it, so the text at the start of work is exact (unlike Linear)."""
+    auth = base64.b64encode(f"{email}:{api_token}".encode()).decode()
+    code, body = _http(f"{base_url.rstrip('/')}/rest/api/2/issue/{key}?expand=changelog"
+                       "&fields=summary,description,comment,reporter", auth, accept="application/json", auth="Basic")
+    if code != 200:
+        return None
+    try:
+        iss = json.loads(body)
+    except ValueError:
+        return None
+    f = iss.get("fields") or {}
+    t = Ticket(ref=iss.get("key", key), title=f.get("summary") or "", body=f.get("description") or "",
+               url=f"{base_url.rstrip('/')}/browse/{iss.get('key', key)}")
+    reporter = ((f.get("reporter") or {}).get("accountId") or (f.get("reporter") or {}).get("name"))
+    for c in ((f.get("comment") or {}).get("comments") or [])[-30:]:
+        a = c.get("author") or {}
+        role = "TICKET AUTHOR" if reporter and reporter in (a.get("accountId"), a.get("name")) else "COMMENTER"
+        t.comments.append(f"{a.get('displayName', 'unknown')} ({role}, {(c.get('created') or '')[:10]}): "
+                          f"{(c.get('body') or '')[:1500]}")
+    edits = sorted((h for h in (iss.get("changelog") or {}).get("histories", [])
+                    for i in h.get("items", []) if i.get("field") == "description"), key=lambda h: h["created"])
+    later = [h for h in edits if _jira_ts(h["created"]) > started]
+    t.changed_at = [h["created"] for h in later]
+    if later:
+        first = next(i for i in later[0]["items"] if i.get("field") == "description")
+        t.body_at_start = first.get("fromString") or ""
+    else:
+        t.body_at_start = t.body
+    return t
+
+
+def _jira_ts(s: str) -> datetime:
+    # Jira writes "2026-11-02T14:03:11.123+0000"
+    return datetime.strptime(s[:19] + s[-5:], "%Y-%m-%dT%H:%M:%S%z")
+
+
+# -- robot configuration ------------------------------------------------------------------------------------
+
+ROBOT_MARKERS = ("package.xml",)
+ROBOT_FILE = re.compile(r"(\.urdf|\.xacro|\.launch(\.py|\.xml)?|\.sdf|/(config|params|param)/[^/]+\.ya?ml)$", re.I)
+MAX_ROBOT_CHARS = 40_000
+
+
+def robot_config(token: str, repo: str, sha: str, diff: str) -> str:
+    """Parameter files, launch files and robot descriptions at the PR's head that the diff doesn't show.
+
+    Robot requirements are often limits and settings ("cap joint velocity at 1.2 rad/s") that live in a YAML
+    file the PR never touched. Without them the check can only say "can't tell"; with them it can say met or
+    missed. Only for ROS-style repos (a package.xml somewhere), and within a fixed character budget."""
+    code, text = _http(f"https://api.github.com/repos/{repo}/git/trees/{sha}?recursive=1", token)
+    if code != 200:
+        return ""
+    paths = [e["path"] for e in json.loads(text).get("tree", []) if e.get("type") == "blob"]
+    if not any(p.rsplit("/", 1)[-1] in ROBOT_MARKERS for p in paths):
+        return ""
+    in_diff = set(re.findall(r"^\+\+\+ b/(.+)$", diff, re.M))
+    picked = [p for p in paths if ROBOT_FILE.search("/" + p) and p not in in_diff and not p.startswith(".github/")]
+    # Files next to what the PR changed first: that's the package the ticket is about.
+    near = {p.rsplit("/", 2)[0] for p in in_diff}
+    picked.sort(key=lambda p: (not any(p.startswith(d + "/") for d in near), len(p)))
+    out, used = [], 0
+    for p in picked[:25]:
+        code, body = _http(f"https://api.github.com/repos/{repo}/contents/{p}?ref={sha}", token,
+                           accept="application/vnd.github.raw")
+        if code != 200:
+            continue
+        body = body[:6_000]
+        if used + len(body) > MAX_ROBOT_CHARS:
+            break
+        out.append(f"--- {p}\n{body}")
+        used += len(body)
+    return "\n\n".join(out)
+
+
 # -- judging ------------------------------------------------------------------------------------------------
 
 def _ts(s: str) -> datetime:
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
-def build_prompt(tickets: list[Ticket], diff: str, pr_title: str = "", pr_body: str = "") -> str:
+def build_prompt(tickets: list[Ticket], diff: str, pr_title: str = "", pr_body: str = "", config: str = "") -> str:
     parts = []
     for t in tickets:
         parts.append(f"<ticket ref=\"{t.ref}\">\nTitle: {t.title}\n\nCurrent text:\n{t.body}\n</ticket>")
@@ -265,6 +359,8 @@ def build_prompt(tickets: list[Ticket], diff: str, pr_title: str = "", pr_body: 
                          f"({', '.join(t.changed_at)}); the earlier text is not available.\n</ticket_change>")
     parts.append(f"<pull_request>\nTitle: {pr_title}\n\n{pr_body}\n</pull_request>")
     parts.append(f"<diff>\n{diff}\n</diff>")
+    if config:
+        parts.append(f"<robot_config>\n{config}\n</robot_config>")
     return "\n\n".join(parts) + "\n\nList each ticket's requirements and judge each one against the diff."
 
 
@@ -374,7 +470,28 @@ def render(result: dict, tickets: list[Ticket], truncated: bool = False) -> str:
                  "Checked by [Lians](https://www.lians.ai/?ref=pr-comment), which reads the ticket as it is now, "
                  "not when the work started. Free for open source: "
                  "[add it to your repo](https://github.com/marketplace/actions/lians-check).</sub>")
+    lines.append(_data_comment(result, tickets))
     return "\n".join(lines)
+
+
+def _data_comment(result: dict, tickets: list[Ticket]) -> str:
+    """The check as data, hidden in the comment: the traceability export and the spec-change alert read it back."""
+    data = {"v": 1, "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            **{k: v for k, v in (result.get("meta") or {}).items()},
+            "tickets": [{"ref": t.ref, "title": t.title, "url": t.url, "sha": t.sha, "changed": t.changed}
+                        for t in tickets],
+            "requirements": result["requirements"]}
+    return f"<!-- lians-data:{base64.b64encode(json.dumps(data).encode()).decode()} -->"
+
+
+def read_data(body: str) -> dict | None:
+    m = DATA_RE.search(body or "")
+    if not m:
+        return None
+    try:
+        return json.loads(base64.b64decode(m.group(1)))
+    except (ValueError, TypeError):
+        return None
 
 
 def _row(r: dict) -> str:
@@ -386,9 +503,49 @@ def _cell(s: str) -> str:
     return " ".join(str(s).split()).replace("|", "\\|")
 
 
-def upsert_comment(token: str, repo: str, pr: int, body: str) -> str:
+def _own_comment(token: str, repo: str, pr: int) -> dict | None:
     code, text = _http(f"https://api.github.com/repos/{repo}/issues/{pr}/comments?per_page=100", token)
-    mine = next((c for c in json.loads(text) if MARKER in (c.get("body") or "")), None) if code == 200 else None
+    return next((c for c in json.loads(text) if MARKER in (c.get("body") or "")), None) if code == 200 else None
+
+
+def previous_check(token: str, repo: str, pr: int) -> dict | None:
+    """The data from the last check on this PR, if there was one."""
+    mine = _own_comment(token, repo, pr)
+    return read_data(mine["body"]) if mine else None
+
+
+def spec_alert(prev: dict | None, result: dict, tickets: list[Ticket]) -> str:
+    """A short comment for the PR's author when a ticket was edited since the last check and the PR no longer
+    covers it. Empty when nothing needs saying. A new comment (not an edit) so GitHub notifies them."""
+    if not prev:
+        return ""
+    before = {t["ref"]: t.get("sha") for t in prev.get("tickets", [])}
+    edited = [t for t in tickets if before.get(t.ref) and before[t.ref] != t.sha]
+    if not edited:
+        return ""
+    refs = {t.ref for t in edited}
+    open_reqs = [r for r in result["requirements"] if r["status"] != "met"
+                 and (r["ticket"] in refs or len(tickets) == 1)]
+    if not open_reqs:
+        return ""
+    who = (result.get("meta") or {}).get("pr_author")
+    names = ", ".join(f"[{t.ref}]({t.url})" if t.url else t.ref for t in edited)
+    lines = [ALERT_MARKER, f"{'@' + who + ' ' if who else ''}heads up: {names} was edited since Lians last checked "
+             f"this PR. {len(open_reqs)} requirement(s) now need a look:", ""]
+    lines += [f"- {ICON[r['status']]} {_cell(r['requirement'])}" for r in open_reqs[:10]]
+    lines += ["", "<sub>Details in the Lians check comment above, which has been updated.</sub>"]
+    return "\n".join(lines)
+
+
+def post_comment(token: str, repo: str, pr: int, body: str) -> str:
+    code, text = _http(f"https://api.github.com/repos/{repo}/issues/{pr}/comments", token, {"body": body})
+    if code >= 300:
+        raise RuntimeError(f"could not post the comment: {code} {text[:200]}")
+    return json.loads(text)["html_url"]
+
+
+def upsert_comment(token: str, repo: str, pr: int, body: str) -> str:
+    mine = _own_comment(token, repo, pr)
     if mine:
         code, text = _http(mine["url"], token, {"body": body}, method="PATCH")
     else:
@@ -408,14 +565,23 @@ def check_pr(repo: str, pr: int, token: str, linear_key: str | None, backend: st
     nums = [n["number"] for n in p["closingIssuesReferences"]["nodes"]]
     nums += [int(n) for n in CLOSING_REF.findall(p["body"] or "") if int(n) not in nums]
     tickets = [t for t in (github_ticket(token, owner, name, n, started) for n in nums[:5]) if t]
-    if linear_key:
-        keys = dict.fromkeys(LINEAR_KEY.findall(" ".join([p["title"], p["headRefName"], p["body"] or ""])))
-        tickets += [t for t in (linear_ticket(linear_key, k, started) for k in list(keys)[:5]) if t]
+    keys = list(dict.fromkeys(LINEAR_KEY.findall(" ".join([p["title"], p["headRefName"], p["body"] or ""]))))[:5]
+    jira = (os.environ.get("JIRA_BASE_URL"), os.environ.get("JIRA_EMAIL"), os.environ.get("JIRA_API_TOKEN"))
+    for k in keys:
+        t = jira_ticket(*jira, k, started) if all(jira) else None
+        t = t or (linear_ticket(linear_key, k, started) if linear_key else None)
+        if t:
+            tickets.append(t)
     if not tickets:
         return "", {}, []
     _, diff = _http(f"https://api.github.com/repos/{repo}/pulls/{pr}", token, accept="application/vnd.github.diff")
     truncated = len(diff) > MAX_DIFF_CHARS
-    result = judge(build_prompt(tickets, diff[:MAX_DIFF_CHARS], p["title"], p["body"] or ""), backend)
+    use_config = os.environ.get("LIANS_ROBOT_CONTEXT", "auto") != "off"
+    config = robot_config(token, repo, p["headRefOid"], diff) if use_config else ""
+    result = judge(build_prompt(tickets, diff[:MAX_DIFF_CHARS], p["title"], p["body"] or "", config), backend)
+    result["meta"] = {"repo": repo, "pr": pr, "pr_url": p["url"], "pr_title": p["title"],
+                      "pr_author": (p.get("author") or {}).get("login"), "head_sha": p["headRefOid"],
+                      "robot_config": bool(config)}
     return render(result, tickets, truncated), result, tickets
 
 
@@ -430,7 +596,16 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="print the comment instead of posting it")
     ap.add_argument("--fail-on-missed", action="store_true", help="exit 1 when a requirement is missed")
     ap.add_argument("--json", action="store_true", help="also print the raw result")
+    ap.add_argument("--export", action="store_true",
+                    help="write a traceability record (one row per requirement per PR) from every Lians check in the repo")
+    ap.add_argument("--out", default="lians-trace.csv", help="where --export writes (CSV, plus a .md summary)")
     args = ap.parse_args()
+
+    if args.export:
+        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or _gh_cli_token()
+        rows = export_trace(token, args.repo, args.out)
+        print(f"Wrote {rows} requirement rows to {args.out} and a summary to {_md_path(args.out)}")
+        return 0
 
     if args.ticket_file:
         body = open(args.ticket_file, encoding="utf-8").read()
@@ -453,14 +628,18 @@ def main() -> int:
                 if _has_ticket(token, args.repo, pr):
                     print(upsert_comment(token, args.repo, pr, SETUP_NOTE))
                 continue
+            prev = previous_check(token, args.repo, pr) if not args.dry_run else None
             comment, result, tickets = check_pr(args.repo, pr, token, os.environ.get("LINEAR_API_KEY"), args.backend)
             if not tickets:
-                print(f"PR #{pr}: no linked ticket (closing issue, #123 mention, or Linear key). Nothing to check.")
+                print(f"PR #{pr}: no linked ticket (closing issue, #123 mention, or Linear/Jira key). Nothing to check.")
                 continue
             if args.dry_run:
                 print(comment)
             else:
                 print(upsert_comment(token, args.repo, pr, comment))
+                alert = spec_alert(prev, result, tickets)
+                if alert:
+                    print(post_comment(token, args.repo, pr, alert))
             if args.json:
                 print(json.dumps(result, indent=1))
             failed |= any(r["status"] in ("missed", "partial") for r in result["requirements"])
@@ -483,6 +662,74 @@ def _prs_from_event(token: str, repo: str) -> list[int]:
     if ev.get("issue") and not ev["issue"].get("pull_request"):
         return open_prs_for_issue(token, repo, int(ev["issue"]["number"]))
     return []
+
+
+TRACE_FIELDS = ["ticket", "ticket_title", "ticket_url", "requirement", "status", "changed_after_start", "evidence",
+                "pr", "pr_title", "pr_url", "pr_state", "merged_at", "head_sha", "checked_at"]
+
+
+def export_trace(token: str, repo: str, out: str) -> int:
+    """One row per requirement per checked PR, from the data each Lians comment carries. For audits and safety
+    reviews: which requirement was built in which PR, with what evidence, as of which commit."""
+    rows, page = [], 1
+    while page <= 30:
+        code, text = _http(f"https://api.github.com/repos/{repo}/issues/comments?per_page=100&page={page}"
+                           "&sort=updated&direction=desc", token)
+        batch = json.loads(text) if code == 200 else []
+        for c in batch:
+            data = read_data(c.get("body") or "") if MARKER in (c.get("body") or "") else None
+            if not data:
+                continue
+            num = int(c["issue_url"].rsplit("/", 1)[-1])
+            _, ptext = _http(f"https://api.github.com/repos/{repo}/pulls/{num}", token)
+            pinfo = json.loads(ptext) if ptext.startswith("{") else {}
+            tick = {t["ref"]: t for t in data.get("tickets", [])}
+            for r in data.get("requirements", []):
+                t = tick.get(r["ticket"]) or (next(iter(tick.values())) if len(tick) == 1 else {})
+                rows.append({"ticket": r["ticket"], "ticket_title": t.get("title", ""), "ticket_url": t.get("url", ""),
+                             "requirement": r["requirement"], "status": r["status"],
+                             "changed_after_start": r["changed_after_start"], "evidence": r["evidence"],
+                             "pr": num, "pr_title": pinfo.get("title", data.get("pr_title", "")),
+                             "pr_url": pinfo.get("html_url", data.get("pr_url", "")),
+                             "pr_state": "merged" if pinfo.get("merged_at") else pinfo.get("state", ""),
+                             "merged_at": pinfo.get("merged_at") or "", "head_sha": data.get("head_sha", ""),
+                             "checked_at": data.get("checked_at", "")})
+        if len(batch) < 100:
+            break
+        page += 1
+    rows.sort(key=lambda r: (r["ticket"], r["pr"]))
+    with open(out, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=TRACE_FIELDS)
+        w.writeheader()
+        w.writerows(rows)
+    with open(_md_path(out), "w", encoding="utf-8") as f:
+        f.write(_trace_summary(repo, rows))
+    return len(rows)
+
+
+def _md_path(out: str) -> str:
+    return out.rsplit(".", 1)[0] + ".md"
+
+
+def _trace_summary(repo: str, rows: list[dict]) -> str:
+    when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    open_ = [r for r in rows if r["status"] != "met"]
+    lines = [f"# Requirement traceability: {repo}", "", f"Generated by Lians on {when} from {len({r['pr'] for r in rows})} "
+             f"checked pull requests and {len(rows)} requirements.", "",
+             f"- Met: {sum(r['status'] == 'met' for r in rows)}",
+             f"- Missed or partly built: {sum(r['status'] in ('missed', 'partial') for r in rows)}",
+             f"- Couldn't tell from the diff: {sum(r['status'] == 'unclear' for r in rows)}",
+             f"- Changed after work started: {sum(bool(r['changed_after_start']) for r in rows)}", ""]
+    if open_:
+        lines += ["## Needs attention", "", "| Ticket | Requirement | Status | PR | Evidence |", "|---|---|---|---|---|"]
+        lines += [f"| {r['ticket']} | {_cell(r['requirement'])} | {r['status']} | [#{r['pr']}]({r['pr_url']}) "
+                  f"| {_cell(r['evidence'])} |" for r in open_]
+        lines.append("")
+    lines += ["## Every requirement", "", "| Ticket | Requirement | Status | PR | Commit | Checked |",
+              "|---|---|---|---|---|---|"]
+    lines += [f"| {r['ticket']} | {_cell(r['requirement'])} | {r['status']} | [#{r['pr']}]({r['pr_url']}) "
+              f"| {str(r['head_sha'])[:7]} | {str(r['checked_at'])[:10]} |" for r in rows]
+    return "\n".join(lines) + "\n"
 
 
 def _has_ticket(token: str, repo: str, pr: int) -> bool:
