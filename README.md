@@ -1,5 +1,7 @@
 # Lians check
 
+[![GitHub Marketplace](https://img.shields.io/badge/Marketplace-Lians%20check-blue?logo=github)](https://github.com/marketplace/actions/lians-check)
+
 Every agent PR, checked against the spec before it touches hardware.
 
 Lians reads the ticket a pull request closes (as it reads now, including the discussion) and posts one comment:
