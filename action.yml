@@ -1,5 +1,5 @@
 name: Lians check
-description: Checks each pull request against the ticket as it reads now, and flags requirements that changed after work started.
+description: For robotics and embodied-AI teams. Checks each agent-written PR against its ticket as it reads now, before the code reaches hardware.
 branding:
   icon: check-square
   color: blue

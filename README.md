@@ -1,13 +1,19 @@
 # Lians check
 
-Every agent PR, checked against the ticket.
+Every agent PR, checked against the spec before it touches hardware.
 
 Lians reads the ticket a pull request closes (as it reads now, including the discussion) and posts one comment:
 each requirement marked met, missed, partly done or can't tell, with what changed since the work started
 listed first. When someone edits the ticket, every open PR that closes it is checked again.
 
-It's built for teams whose PRs are written by Claude Code, Codex, Cursor, Devin or Copilot's coding agent, where
-the reviewer reads the diff but nobody re-reads the ticket.
+It's built for robotics and embodied-AI teams whose PRs are written by Claude Code, Codex, Cursor, Devin or
+Copilot's coding agent: ROS 2 nodes, controllers, perception, sim configs. Specs move with the hardware, agents
+build the version they started from, and reviewers read the diff, not the ticket. The limits, stops and
+interfaces at the bottom of a ticket are exactly what gets dropped. It works the same for any team that merges
+agent-written PRs.
+
+What it looks like on robot code: [lians.ai/robotics](https://www.lians.ai/robotics) · A real check:
+[demo PR](https://github.com/ebeirne/lians-check-demo/pull/2)
 
 ## Install (2 minutes)
 
