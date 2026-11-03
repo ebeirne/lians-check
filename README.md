@@ -4,7 +4,7 @@
 
 Agent PRs pass CI and still miss the ticket. Lians posts one comment per PR: every requirement in the linked ticket marked met, missed, partly done, or changed since the agent started.
 
-Keep your code reviewer. This checks the ticket, and re-checks every open PR when the ticket is edited. Free for everyone through January 31, 2027 and free for public repos after that. It runs in your own GitHub Actions on your own Anthropic key (about $0.10–0.30 a review), and nothing is sent to Lians.
+Keep your code reviewer. This checks the ticket, and re-checks every open PR when the ticket is edited. Free for everyone through January 31, 2027, and free for open-source repos after that. It runs in your own GitHub Actions on your own Anthropic key (about $0.10–0.30 a review), and nothing is sent to Lians.
 
 A real check: [demo PR](https://github.com/ebeirne/lians-check-demo/pull/2) · How often agent PRs miss the ticket: [the study](https://www.lians.ai/agent-prs)
 
@@ -118,7 +118,7 @@ what the ticket asks?
 
 ## Pricing and license
 
-Free for everyone through January 31, 2027, and free for public repositories after that. You pay only your own model usage. Teams that want help installing and tuning it can book a free install call: ethan.g.beirne@gmail.com.
+Free for everyone through January 31, 2027, and free after that for public repositories under an OSI-approved open-source license. You pay only your own model usage. Teams that want help installing and tuning it can book a free install call: ethan.g.beirne@gmail.com.
 
 Source-available under the Lians Check License 1.1 (see [LICENSE](LICENSE)).
 
