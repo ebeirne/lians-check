@@ -6,7 +6,9 @@ Agent PRs pass CI and still miss the ticket. Lians posts one comment per PR: eve
 
 Keep your code reviewer. This checks the ticket, and re-checks every open PR when the ticket is edited. Free for everyone through January 31, 2027, and free for open-source repos after that. Install the GitHub App in two clicks, or run the Action in your own GitHub Actions on your own Anthropic key (about $0.10–0.30 a review), with nothing sent to Lians.
 
-A real check: [demo PR](https://github.com/ebeirne/lians-check-demo/pull/2) · How often agent PRs miss the ticket: [the study](https://www.lians.ai/agent-prs)
+![Lians catching an agent PR that passed CI but missed the ticket](docs/demo.gif)
+
+That's a real run: [the actual PR](https://github.com/ebeirne/lians-demo/pull/2) · [full 51-second video](https://www.lians.ai/#demo) · How often agent PRs miss the ticket: [the study](https://www.lians.ai/agent-prs)
 
 ## Install
 
