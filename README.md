@@ -116,6 +116,16 @@ the current scope, and it says "can't tell" rather than "missed" when the work c
 the PR says it was done elsewhere. It does not review code quality; it answers one question: does this PR do
 what the ticket asks?
 
+## Troubleshooting
+
+- **"No Claude API key, so Lians skipped this run"** (warning): the `ANTHROPIC_API_KEY` secret is missing or isn't
+  passed as `anthropic-api-key`. Add it under Settings → Secrets and variables → Actions. PRs that link a ticket
+  also get a short setup comment.
+- **"Anthropic rejected the ANTHROPIC_API_KEY secret (401/403)"** (error): the key is wrong, revoked or has no API
+  access. Replace the secret and re-run the job. Lians never prints the key and posts no comment in this case.
+
+Both exit successfully, so a missing key never blocks a merge.
+
 ## Pricing and license
 
 Free for everyone through January 31, 2027, and free for public repositories after that. You pay only your own model usage. Teams that want help installing and tuning it can book a free install call: ethan.g.beirne@gmail.com.
