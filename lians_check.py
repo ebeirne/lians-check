@@ -9,6 +9,7 @@ Runs as a GitHub Action (see action.yml) or locally:
   python check/lians_check.py --repo owner/name --pr 123 --dry-run      # print the comment, post nothing
   python check/lians_check.py --ticket-file t.md --diff-file d.diff      # no GitHub at all
   python check/lians_check.py --repo owner/name --export --out trace.csv  # traceability record of every check
+  python check/lians_check.py --init --repo owner/name                   # open a setup PR that adds the workflow
 """
 from __future__ import annotations
 
@@ -300,6 +301,23 @@ def _jira_ts(s: str) -> datetime:
     return datetime.strptime(s[:19] + s[-5:], "%Y-%m-%dT%H:%M:%S%z")
 
 
+NOISE_FILE = re.compile(r"(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Pipfile\.lock|uv\.lock|"
+                        r"Cargo\.lock|go\.sum|composer\.lock|Gemfile\.lock)$|\.min\.(js|css)$|\.(snap|svg|png|jpe?g|gif|pdf)$", re.I)
+
+
+def drop_noise(diff: str) -> str:
+    """Lock files, minified bundles and binaries never implement a requirement, but they can fill the diff budget."""
+    parts = re.split(r"(?m)^(?=diff --git )", diff)
+    keep = []
+    for part in parts:
+        m = re.match(r"diff --git a/(\S+) b/(\S+)", part)
+        if m and NOISE_FILE.search(m.group(2)):
+            keep.append(f"diff --git a/{m.group(1)} b/{m.group(2)}\n(skipped by Lians: lock file or generated asset)\n")
+        else:
+            keep.append(part)
+    return "".join(keep)
+
+
 # -- robot configuration ------------------------------------------------------------------------------------
 
 ROBOT_MARKERS = ("package.xml",)
@@ -575,6 +593,7 @@ def check_pr(repo: str, pr: int, token: str, linear_key: str | None, backend: st
     if not tickets:
         return "", {}, []
     _, diff = _http(f"https://api.github.com/repos/{repo}/pulls/{pr}", token, accept="application/vnd.github.diff")
+    diff = drop_noise(diff)
     truncated = len(diff) > MAX_DIFF_CHARS
     use_config = os.environ.get("LIANS_ROBOT_CONTEXT", "auto") != "off"
     config = robot_config(token, repo, p["headRefOid"], diff) if use_config else ""
@@ -599,7 +618,16 @@ def main() -> int:
     ap.add_argument("--export", action="store_true",
                     help="write a traceability record (one row per requirement per PR) from every Lians check in the repo")
     ap.add_argument("--out", default="lians-trace.csv", help="where --export writes (CSV, plus a .md summary)")
+    ap.add_argument("--init", action="store_true",
+                    help="open a setup PR in --repo that adds the Lians workflow (uses your gh login)")
     args = ap.parse_args()
+
+    if args.init:
+        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or _gh_cli_token()
+        if not args.repo:
+            raise SystemExit("Usage: python lians_check.py --init --repo owner/name")
+        print(init_repo(token, args.repo))
+        return 0
 
     if args.export:
         token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or _gh_cli_token()
@@ -658,10 +686,75 @@ def _prs_from_event(token: str, repo: str) -> list[int]:
         raise SystemExit("--pr is required outside a GitHub Actions run")
     ev = json.load(open(path, encoding="utf-8"))
     if ev.get("pull_request"):
-        return [int(ev["pull_request"]["number"])]
+        pr = ev["pull_request"]
+        head = ((pr.get("head") or {}).get("repo") or {}).get("full_name")
+        if head and head != repo and ev.get("action") and os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
+            # Fork PRs get a read-only token and no secrets, so there's nothing useful to do. Skip quietly.
+            print(f"PR #{pr['number']} comes from a fork ({head}); Lians skips fork PRs.")
+            return []
+        return [int(pr["number"])]
     if ev.get("issue") and not ev["issue"].get("pull_request"):
         return open_prs_for_issue(token, repo, int(ev["issue"]["number"]))
     return []
+
+
+WORKFLOW = """name: Lians check
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  issues:
+    types: [edited]
+permissions:
+  contents: read        # read the diff and config files
+  pull-requests: write  # post the one Lians comment
+  issues: write         # read tickets; tag the PR author when a ticket changes
+concurrency:
+  group: lians-check-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ebeirne/lians-check@v1
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+"""
+
+
+def init_repo(token: str, repo: str) -> str:
+    """Open a setup PR that adds the workflow file, so the only manual step left is the API key secret."""
+    code, text = _http(f"https://api.github.com/repos/{repo}", token)
+    if code != 200:
+        raise SystemExit(f"Can't read {repo} ({code}). Check the name and that `gh auth login` has repo access.")
+    base = json.loads(text)["default_branch"]
+    _, text = _http(f"https://api.github.com/repos/{repo}/git/ref/heads/{base}", token)
+    sha = json.loads(text)["object"]["sha"]
+    branch = "lians-check-setup"
+    code, text = _http(f"https://api.github.com/repos/{repo}/git/refs", token, {"ref": f"refs/heads/{branch}", "sha": sha})
+    if code >= 300 and "already exists" not in text:
+        raise SystemExit(f"Couldn't create branch {branch}: {code} {text[:200]}")
+    path = ".github/workflows/lians-check.yml"
+    code, text = _http(f"https://api.github.com/repos/{repo}/contents/{path}?ref={branch}", token)
+    existing = json.loads(text).get("sha") if code == 200 else None
+    body = {"message": "Add Lians check", "branch": branch,
+            "content": base64.b64encode(WORKFLOW.encode()).decode(), **({"sha": existing} if existing else {})}
+    code, text = _http(f"https://api.github.com/repos/{repo}/contents/{path}", token, body, method="PUT")
+    if code >= 300:
+        raise SystemExit(f"Couldn't write {path}: {code} {text[:200]}")
+    secrets_url = f"https://github.com/{repo}/settings/secrets/actions/new"
+    pr_body = (f"Adds [Lians check](https://github.com/marketplace/actions/lians-check): one comment per PR listing every "
+               f"requirement in the linked ticket as met, missed, or changed since work started.\n\n"
+               f"**One step before merging:** add a repository secret named `ANTHROPIC_API_KEY` ({secrets_url}). "
+               f"Lians runs in your own Actions on that key (about $0.10–0.30 a review); nothing is sent to Lians.\n\n"
+               f"It's informational only (it never fails the build), skips fork PRs, lock files and generated assets, "
+               f"and keeps one comment per PR updated in place.")
+    code, text = _http(f"https://api.github.com/repos/{repo}/pulls", token,
+                       {"title": "Add Lians check", "head": branch, "base": base, "body": pr_body})
+    if code >= 300:
+        if "already exists" in text:
+            return f"A setup PR already exists on branch {branch}. Add the secret at {secrets_url}"
+        raise SystemExit(f"Couldn't open the PR: {code} {text[:200]}")
+    return f"Opened {json.loads(text)['html_url']}\nNext: add the ANTHROPIC_API_KEY secret at {secrets_url}, then merge."
 
 
 TRACE_FIELDS = ["ticket", "ticket_title", "ticket_url", "requirement", "status", "changed_after_start", "evidence",

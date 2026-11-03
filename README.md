@@ -2,26 +2,24 @@
 
 [![GitHub Marketplace](https://img.shields.io/badge/Marketplace-Lians%20check-blue?logo=github)](https://github.com/marketplace/actions/lians-check)
 
-Every agent PR, checked against the spec before it touches hardware.
+Agent PRs pass CI and still miss the ticket. Lians posts one comment per PR: every requirement in the linked ticket marked met, missed, partly done, or changed since the agent started.
 
-Lians reads the ticket a pull request closes (as it reads now, including the discussion) and posts one comment:
-each requirement marked met, missed, partly done or can't tell, with what changed since the work started
-listed first. When someone edits the ticket, every open PR that closes it is checked again.
+Keep your code reviewer. This checks the ticket, and re-checks every open PR when the ticket is edited. Free for everyone through January 31, 2027 and free for public repos after that. It runs in your own GitHub Actions on your own Anthropic key (about $0.10–0.30 a review), and nothing is sent to Lians.
 
-It's built for robotics and embodied-AI teams whose PRs are written by Claude Code, Codex, Cursor, Devin or
-Copilot's coding agent: ROS 2 nodes, controllers, perception, sim configs. Specs move with the hardware, agents
-build the version they started from, and reviewers read the diff, not the ticket. The limits, stops and
-interfaces at the bottom of a ticket are exactly what gets dropped. It works the same for any team that merges
-agent-written PRs.
-
-What it looks like on robot code: [lians.ai/robotics](https://www.lians.ai/robotics) · A real check:
-[demo PR](https://github.com/ebeirne/lians-check-demo/pull/2)
+A real check: [demo PR](https://github.com/ebeirne/lians-check-demo/pull/2) · How often agent PRs miss the ticket: [the study](https://www.lians.ai/agent-prs)
 
 ## Install (2 minutes)
 
-1. Add a repository secret `ANTHROPIC_API_KEY` (Settings → Secrets and variables → Actions). Lians runs in
-   your own Actions under your key; a review usually costs $0.10–0.30.
-2. Add `.github/workflows/lians-check.yml`:
+**Fastest:** one command opens a setup PR in your repo (uses your `gh` login):
+
+```bash
+curl -sLO https://raw.githubusercontent.com/ebeirne/lians-check/v1/lians_check.py
+python lians_check.py --init --repo your-org/your-repo
+```
+
+Then add a repository secret `ANTHROPIC_API_KEY` (the PR links straight to the page) and merge. Open a PR that says `Fixes #123`; the comment appears within a few minutes.
+
+**By hand:** add the `ANTHROPIC_API_KEY` secret and this file as `.github/workflows/lians-check.yml`:
 
 ```yaml
 name: Lians check
@@ -31,9 +29,9 @@ on:
   issues:
     types: [edited]
 permissions:
-  contents: read
-  pull-requests: write
-  issues: write
+  contents: read        # read the diff and config files
+  pull-requests: write  # post the one Lians comment
+  issues: write         # read tickets; tag the PR author when a ticket changes
 concurrency:
   group: lians-check-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
@@ -46,7 +44,7 @@ jobs:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
-3. Open a PR that says `Fixes #123`. The comment appears within a few minutes.
+**Safe defaults:** informational only (it never fails your build unless you set `fail-on-missed: "true"`); one comment per PR, updated in place; skips PRs from forks (they get no secrets); skips lock files, minified bundles and binaries; only grades issues the PR says it closes; treats the ticket author's and maintainers' comments as the current scope. If the key is missing, it posts a one-line setup note instead of failing. For supply-chain safety you can pin `uses: ebeirne/lians-check@<commit-sha>` instead of `@v1`.
 
 Optional inputs: `linear-api-key` (read-only, to check Linear tickets named in the PR title, branch or body),
 `fail-on-missed: "true"` to fail the check when a requirement is missed.
@@ -118,10 +116,10 @@ the current scope, and it says "can't tell" rather than "missed" when the work c
 the PR says it was done elsewhere. It does not review code quality; it answers one question: does this PR do
 what the ticket asks?
 
-## Pricing
+## Pricing and license
 
-Free for open-source projects, for a 30-day evaluation, and for design partners. Commercial teams after that:
-$300/month per organisation, or $99/month for life for the first 10 teams who start before Dec 31, 2026 (code
-`FOUNDING99`). See [lians.ai](https://www.lians.ai).
+Free for everyone through January 31, 2027, and free for public repositories after that. You pay only your own model usage. Teams that want help installing and tuning it can book a free install call: ethan.g.beirne@gmail.com.
+
+Source-available under the Lians Check License 1.1 (see [LICENSE](LICENSE)).
 
 Questions or noise reports: ethan.g.beirne@gmail.com
