@@ -487,7 +487,7 @@ def render(result: dict, tickets: list[Ticket], truncated: bool = False) -> str:
     lines.append("<sub>✅ met · 🟡 partial · ❌ missed · ❔ can't tell from the diff<br>"
                  "Checked by [Lians](https://www.lians.ai/?ref=pr-comment), which reads the ticket as it is now, "
                  "not when the work started. Free for open source: "
-                 "[add it to your repo](https://github.com/marketplace/actions/lians-check).</sub>")
+                 "[add it to your repo](https://www.lians.ai/install).</sub>")
     lines.append(_data_comment(result, tickets))
     return "\n".join(lines)
 

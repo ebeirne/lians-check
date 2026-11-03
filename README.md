@@ -4,11 +4,15 @@
 
 Agent PRs pass CI and still miss the ticket. Lians posts one comment per PR: every requirement in the linked ticket marked met, missed, partly done, or changed since the agent started.
 
-Keep your code reviewer. This checks the ticket, and re-checks every open PR when the ticket is edited. Free for everyone through January 31, 2027, and free for open-source repos after that. It runs in your own GitHub Actions on your own Anthropic key (about $0.10–0.30 a review), and nothing is sent to Lians.
+Keep your code reviewer. This checks the ticket, and re-checks every open PR when the ticket is edited. Free for everyone through January 31, 2027, and free for open-source repos after that. Install the GitHub App in two clicks, or run the Action in your own GitHub Actions on your own Anthropic key (about $0.10–0.30 a review), with nothing sent to Lians.
 
 A real check: [demo PR](https://github.com/ebeirne/lians-check-demo/pull/2) · How often agent PRs miss the ticket: [the study](https://www.lians.ai/agent-prs)
 
-## Install (2 minutes)
+## Install
+
+**Easiest: [install the GitHub App](https://www.lians.ai/install).** Two clicks, no workflow file, no API key. The diff and ticket pass through Lians to Anthropic and aren't stored.
+
+**Or run the Action** in your own CI on your own key, with nothing sent to Lians:
 
 **Fastest:** one command opens a setup PR in your repo (uses your `gh` login):
 
