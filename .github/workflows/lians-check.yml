@@ -1,0 +1,28 @@
+# Dogfood: Lians checks its own PRs against the issues they close.
+name: Lians check
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  issues:
+    types: [edited]
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+concurrency:
+  group: lians-check-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - id: key
+        env:
+          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: echo "present=$([ -n "$KEY" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        if: steps.key.outputs.present == 'true'
+      - uses: ./
+        if: steps.key.outputs.present == 'true'
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
