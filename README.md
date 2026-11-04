@@ -10,7 +10,15 @@ Keep your code reviewer. This checks the ticket, and re-checks every open PR whe
 
 That's a real run: [the actual PR](https://github.com/ebeirne/lians-demo/pull/2) · [full 51-second video](https://www.lians.ai/#demo) · How often agent PRs miss the ticket: [the study](https://www.lians.ai/agent-prs)
 
+## Free for open source
+
+Maintainers: **Lians stays free for public repos under an OSI-approved open-source license.** That holds after January 31, 2027, when free use ends for everyone else. No sales call and no card.
+
+If you're getting agent PRs from contributors, this shows you what each one left undone before you review it. [Install it in two clicks](https://www.lians.ai/install), or [try it on a sample repo](https://github.com/ebeirne/lians-check-starter) first.
+
 ## Install
+
+**Try it first:** [the starter repo](https://github.com/ebeirne/lians-check-starter) has a sample ticket and an agent PR, so you can watch a real check in about 2 minutes.
 
 **Easiest: [install the GitHub App](https://www.lians.ai/install).** Two clicks, no workflow file, no API key. The diff and ticket pass through Lians to Anthropic and aren't stored.
 
