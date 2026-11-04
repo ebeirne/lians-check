@@ -36,7 +36,15 @@ DATA_RE = re.compile(r"<!-- lians-data:([A-Za-z0-9+/=]+) -->")
 SETUP_NOTE = (MARKER + "\n### Lians check\n\nLians found a linked ticket but has no Claude API key, so it did not "
               "review this PR. Add an `ANTHROPIC_API_KEY` repository secret and pass it to the action as "
               "`anthropic-api-key`, or set `bedrock-model` to run Claude through your own Amazon Bedrock.")
+NO_KEY_HINT = ("No Claude API key, so Lians skipped this run. Add a repository secret named ANTHROPIC_API_KEY and "
+               "pass it as anthropic-api-key (or set bedrock-model). Setup: https://www.lians.ai/docs")
+KEY_REJECTED_HINT = ("Anthropic rejected the ANTHROPIC_API_KEY secret (401/403), so Lians skipped this PR. Check the "
+                     "key is current and has API access, then re-run. Setup: https://www.lians.ai/docs")
 MODEL = os.environ.get("LIANS_CHECK_MODEL", "claude-opus-5-5")
+
+
+class KeyRejected(Exception):
+    """The Anthropic API refused the key. Reported as an annotation, never with the key itself."""
 MAX_DIFF_CHARS = 300_000
 LINEAR_KEY = re.compile(r"\b([A-Z][A-Z0-9]{1,9}-\d{1,6})\b")
 ISSUE_REF = re.compile(r"(?<![\w/])#(\d+)\b")
@@ -385,15 +393,18 @@ def build_prompt(tickets: list[Ticket], diff: str, pr_title: str = "", pr_body: 
 def judge_api(prompt: str) -> dict:
     import anthropic
     client = anthropic.Anthropic()
-    response = client.beta.messages.create(
-        model=MODEL,
-        max_tokens=16000,
-        system=SYSTEM,
-        messages=[{"role": "user", "content": prompt}],
-        output_config={"effort": "high", "format": {"type": "json_schema", "schema": SCHEMA}},
-        betas=["server-side-fallback-2026-07-01"],
-        extra_body={"fallbacks": "default"},
-    )
+    try:
+        response = client.beta.messages.create(
+            model=MODEL,
+            max_tokens=16000,
+            system=SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+            output_config={"effort": "high", "format": {"type": "json_schema", "schema": SCHEMA}},
+            betas=["server-side-fallback-2026-07-01"],
+            extra_body={"fallbacks": "default"},
+        )
+    except (anthropic.AuthenticationError, anthropic.PermissionDeniedError):
+        raise KeyRejected() from None
     if response.stop_reason == "refusal":
         raise RuntimeError("the model declined to review this PR")
     if response.stop_reason == "max_tokens":
@@ -653,11 +664,16 @@ def main() -> int:
             no_key = (not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("LIANS_BEDROCK_MODEL")
                       and args.backend in ("auto", "api"))
             if no_key and os.environ.get("GITHUB_ACTIONS") and not args.dry_run:
+                print(f"::warning title=Lians check::{NO_KEY_HINT}")
                 if _has_ticket(token, args.repo, pr):
                     print(upsert_comment(token, args.repo, pr, SETUP_NOTE))
                 continue
             prev = previous_check(token, args.repo, pr) if not args.dry_run else None
-            comment, result, tickets = check_pr(args.repo, pr, token, os.environ.get("LINEAR_API_KEY"), args.backend)
+            try:
+                comment, result, tickets = check_pr(args.repo, pr, token, os.environ.get("LINEAR_API_KEY"), args.backend)
+            except KeyRejected:
+                print(f"::error title=Lians check::{KEY_REJECTED_HINT}")
+                continue
             if not tickets:
                 print(f"PR #{pr}: no linked ticket (closing issue, #123 mention, or Linear/Jira key). Nothing to check.")
                 continue
